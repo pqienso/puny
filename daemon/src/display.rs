@@ -42,16 +42,10 @@ impl VirtualDisplay {
         thread::sleep(Duration::from_millis(500));
 
         // Configure monitor
-        let monitor_config = format!(
-            "{},{}x{}@{},auto,1",
-            self.config.name,
-            self.config.width,
-            self.config.height,
-            self.config.refresh_rate,
-        );
+        let monitor_config_str = self.config.to_hyprland_string();
 
         let output = Command::new("hyprctl")
-            .args(["keyword", "monitor", &monitor_config])
+            .args(["keyword", "monitor", &monitor_config_str])
             .output()
             .context("Failed to configure monitor")?;
 
@@ -64,14 +58,7 @@ impl VirtualDisplay {
 
         self.created = true;
 
-        info!(
-            "✓ Virtual display created: {}x{}@{}Hz at ({}, {})",
-            self.config.width,
-            self.config.height,
-            self.config.refresh_rate,
-            self.config.position.x,
-            self.config.position.y
-        );
+        info!("✓ Virtual display created with config: {:?})", self.config);
 
         Ok(())
     }

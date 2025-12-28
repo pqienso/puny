@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use std::process::{Child, Command, Stdio};
 use std::io::{BufReader, Read};
+use std::process::{Child, Command, Stdio};
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use crate::config::DisplayConfig;
 
@@ -40,11 +40,16 @@ impl FrameCapture {
         // Start wf-recorder in raw output mode
         let mut child = Command::new("wf-recorder")
             .args([
-                "-o", &self.display_name,
-                "-c", "rawvideo",
-                "-p", "format=bgra",
-                "-m", "null",
-                "-f", "pipe:1",
+                "-o",
+                &self.display_name,
+                "-c",
+                "rawvideo",
+                "-p",
+                "format=bgra",
+                "-m",
+                "null",
+                "-f",
+                "pipe:1",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -85,8 +90,9 @@ impl FrameCapture {
                         }
 
                         frame_count += 1;
-                        if frame_count % 60 == 0 {
+                        if frame_count >= 60 {
                             info!("Captured {} frames", frame_count);
+                            frame_count = 0;
                         }
                     }
                     Err(e) => {
