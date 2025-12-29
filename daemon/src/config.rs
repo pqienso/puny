@@ -184,7 +184,7 @@ impl Default for PunyConfig {
         Self {
             display: DisplayConfig {
                 name: "PUNY-1".to_string(),
-                resolution: Resolution::preferred(),
+                resolution: Resolution::dimensions(1920, 1080, 60),
                 position: Position::auto(),
                 scale: 1.0,
             },
