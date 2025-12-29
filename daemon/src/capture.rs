@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::DisplayConfig;
 
@@ -10,6 +10,7 @@ pub struct FrameCapture {
     display_name: String,
     width: u32,
     height: u32,
+    refresh_rate: u32,
     process: Option<Child>,
 }
 
@@ -23,10 +24,14 @@ pub struct RawFrame {
 
 impl FrameCapture {
     pub fn new(config: &DisplayConfig) -> Self {
+        let (width, height, refresh_rate) = config
+            .get_dimensions()
+            .expect("Could not detect monitor dimensions");
         Self {
             display_name: config.name.clone(),
-            width: config.width,
-            height: config.height,
+            width,
+            height,
+            refresh_rate,
             process: None,
         }
     }
@@ -34,10 +39,9 @@ impl FrameCapture {
     pub fn start(&mut self, frame_tx: mpsc::Sender<RawFrame>) -> Result<()> {
         info!("Starting frame capture for {}", self.display_name);
 
-        // Calculate expected frame size (BGRA = 4 bytes per pixel)
-        let frame_size = (self.width * self.height * 4) as usize;
-
         // Start wf-recorder in raw output mode
+        // Note: We use muxer "rawvideo" instead of "null" to properly output raw frames
+        info!("Spawning wf-recorder for output: {}", self.display_name);
         let mut child = Command::new("wf-recorder")
             .args([
                 "-o",
@@ -47,26 +51,54 @@ impl FrameCapture {
                 "-p",
                 "format=bgra",
                 "-m",
-                "null",
+                "rawvideo", // Use rawvideo muxer instead of null
                 "-f",
                 "pipe:1",
+                "-r",
+                self.refresh_rate.to_string().as_str(),
             ])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped()) // Capture stderr to see errors
             .spawn()
             .context("Failed to spawn wf-recorder")?;
 
+        info!("wf-recorder spawned with PID: {}", child.id());
+
         let stdout = child.stdout.take().context("Failed to get stdout")?;
+        let stderr = child.stderr.take().context("Failed to get stderr")?;
         self.process = Some(child);
+
+        // Spawn thread to monitor stderr
+        let display_name_stderr = self.display_name.clone();
+        std::thread::spawn(move || {
+            let mut stderr_reader = BufReader::new(stderr);
+            let mut line = String::new();
+
+            while let Ok(n) = stderr_reader.read_line(&mut line) {
+                if n == 0 {
+                    break;
+                }
+                warn!("wf-recorder [{}]: {}", display_name_stderr, line.trim());
+                line.clear();
+            }
+        });
 
         // Spawn thread to read frames
         let display_name = self.display_name.clone();
+        let width = self.width;
+        let height = self.height;
+
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            let mut frame_buffer = vec![0u8; frame_size];
             let mut frame_count = 0u64;
 
-            info!("Frame capture thread started for {}", display_name);
+            let frame_size = (width * height * 4) as usize; // BGRA = 4 bytes per pixel
+            let mut frame_buffer = vec![0u8; frame_size];
+
+            info!(
+                "Frame capture thread started for {} ({}x{}, {} bytes per frame)",
+                display_name, width, height, frame_size
+            );
 
             loop {
                 // Read exact frame size
@@ -79,8 +111,8 @@ impl FrameCapture {
 
                         let frame = RawFrame {
                             data: frame_buffer.clone(),
-                            width: frame_size as u32 / 4 / 1080, // TODO: Fix this
-                            height: 1080,
+                            width,
+                            height,
                             timestamp_us: timestamp,
                         };
 
@@ -90,9 +122,11 @@ impl FrameCapture {
                         }
 
                         frame_count += 1;
-                        if frame_count >= 60 {
+                        if frame_count == 1 {
+                            info!("✓ First frame captured successfully!");
+                        }
+                        if frame_count.is_multiple_of(60) {
                             info!("Captured {} frames", frame_count);
-                            frame_count = 0;
                         }
                     }
                     Err(e) => {
@@ -102,7 +136,7 @@ impl FrameCapture {
                 }
             }
 
-            info!("Frame capture thread stopped");
+            info!("Frame capture thread stopped after {} frames", frame_count);
         });
 
         Ok(())
