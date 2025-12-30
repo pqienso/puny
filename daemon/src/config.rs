@@ -47,24 +47,20 @@ impl Resolution {
         }
     }
 
-    pub fn auto() -> Self {
-        Self::Keyword("auto".to_string())
-    }
-
     pub fn preferred() -> Self {
         Self::Keyword("preferred".to_string())
     }
 
-    pub fn highres() -> Self {
+    pub fn high_res() -> Self {
         Self::Keyword("highres".to_string())
     }
 
-    pub fn highrr() -> Self {
+    pub fn high_rr() -> Self {
         Self::Keyword("highrr".to_string())
     }
 
     pub fn max_width() -> Self {
-        Self::Keyword("max".to_string())
+        Self::Keyword("maxwidth".to_string())
     }
 
     // Helper to get dimensions if explicit
@@ -298,7 +294,7 @@ mod tests {
 
         let config3 = DisplayConfig {
             name: "PUNY-3".to_string(),
-            resolution: Resolution::auto(),
+            resolution: Resolution::preferred(),
             position: Position::auto(),
             scale: 1.0,
         };

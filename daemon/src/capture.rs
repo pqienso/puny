@@ -122,9 +122,6 @@ impl FrameCapture {
                         }
 
                         frame_count += 1;
-                        if frame_count == 1 {
-                            info!("✓ First frame captured successfully!");
-                        }
                         if frame_count.is_multiple_of(60) {
                             info!("Captured {} frames", frame_count);
                         }
