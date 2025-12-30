@@ -1,5 +1,6 @@
 use crate::capture::RawFrame;
 use crate::config::EncoderConfig;
+use crate::hw_detect::{EncoderDetector, HardwareEncoder};
 
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader};
@@ -12,6 +13,7 @@ pub struct VideoEncoder {
     width: u32,
     height: u32,
     frame_rate: u32,
+    selected_encoder: HardwareEncoder,
 }
 
 #[derive(Debug, Clone)]
@@ -24,21 +26,53 @@ pub struct EncodedPacket {
 }
 
 impl VideoEncoder {
-    pub fn new(config: EncoderConfig, width: u32, height: u32, frame_rate: u32) -> Self {
-        Self {
+    pub fn new(config: EncoderConfig, width: u32, height: u32, frame_rate: u32) -> Result<Self> {
+        // Detect available hardware encoders
+        let detector = EncoderDetector::new()?;
+
+        info!("Available encoders:");
+        for encoder in detector.list_available() {
+            let hw_marker = if encoder.is_hardware() { "⚡" } else { "💻" };
+            info!(
+                "  {} {} (priority: {})",
+                hw_marker,
+                encoder.codec_name(),
+                encoder.priority()
+            );
+        }
+
+        // Select best encoder
+        let selected_encoder = detector
+            .get_best_encoder()
+            .context("No suitable encoder found")?
+            .clone();
+
+        info!(
+            "Selected encoder: {} ({})",
+            selected_encoder.codec_name(),
+            if selected_encoder.is_hardware() {
+                "Hardware"
+            } else {
+                "Software"
+            }
+        );
+
+        Ok(Self {
             config: Arc::new(config),
             width,
             height,
             frame_rate,
-        }
+            selected_encoder,
+        })
     }
 
     pub fn start(
         &self,
-        mut frame_rx: mpsc::Receiver<RawFrame>,
+        frame_rx: mpsc::Receiver<RawFrame>,
         packet_tx: mpsc::Sender<EncodedPacket>,
     ) -> Result<()> {
-        info!("Starting H.264 encoder");
+        info!("Starting video encoder");
+        info!("  Encoder: {}", self.selected_encoder.codec_name());
         info!(
             "  Resolution: {}x{}@{}",
             self.width, self.height, self.frame_rate
@@ -51,11 +85,12 @@ impl VideoEncoder {
         let width = self.width;
         let height = self.height;
         let frame_rate = self.frame_rate;
+        let encoder = self.selected_encoder.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) =
-                Self::encode_thread(config, width, height, frame_rate, frame_rx, packet_tx)
-            {
+            if let Err(e) = Self::encode_thread(
+                config, width, height, frame_rate, encoder, frame_rx, packet_tx,
+            ) {
                 error!("Encoder thread failed: {}", e);
             }
         });
@@ -68,82 +103,34 @@ impl VideoEncoder {
         width: u32,
         height: u32,
         frame_rate: u32,
+        encoder: HardwareEncoder,
         mut frame_rx: mpsc::Receiver<RawFrame>,
         packet_tx: mpsc::Sender<EncodedPacket>,
     ) -> Result<()> {
-        // For now, we'll use x264enc via FFmpeg command line
-        // In Phase 2.5, we can optimize to use ffmpeg-next bindings directly
         use std::io::Write;
         use std::process::{Command, Stdio};
+
         info!("Spawning FFmpeg encoder process");
-        // Build FFmpeg command for H.264 encoding
-        let preset = match config.preset {
-            crate::config::EncoderPreset::UltraLowLatency => "ultrafast",
-            crate::config::EncoderPreset::LowLatency => "veryfast",
-            crate::config::EncoderPreset::Balanced => "medium",
-            crate::config::EncoderPreset::HighQuality => "slow",
-        };
-        let bitrate = format!("{}k", config.bitrate_kbps);
-        let framerate_str = frame_rate.to_string();
+
+        // Create new detector to build args
+        let detector = EncoderDetector::new()?;
+
+        // Build FFmpeg arguments using the detector
+        let ffmpeg_args = detector.build_ffmpeg_args(
+            &encoder,
+            width,
+            height,
+            frame_rate,
+            config.bitrate_kbps,
+            &config.preset,
+            config.keyframe_interval,
+        );
+
+        info!("FFmpeg command: ffmpeg {}", ffmpeg_args.join(" "));
+
+        // Spawn FFmpeg process
         let mut child = Command::new("ffmpeg")
-            .args([
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "bgra",
-                "-s",
-                &format!("{}x{}", width, height),
-                "-r",
-                &framerate_str,
-                "-i",
-                "pipe:0",
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                "p3", // p1 is fastest/lowest latency for NVENC
-                "-tune",
-                "hq", // Ultra-low latency
-                "-zerolatency",
-                "1",
-                "-b:v",
-                &bitrate,
-                "-g",
-                &config.keyframe_interval.to_string(),
-                "-bf",
-                "0",
-                "-f",
-                "h264",
-                "pipe:1",
-            ])
-            // .args([
-            //     "-f",
-            //     "rawvideo",
-            //     "-pix_fmt",
-            //     "bgra",
-            //     "-s",
-            //     &format!("{}x{}", width, height),
-            //     "-r",
-            //     &framerate_str,
-            //     "-i",
-            //     "pipe:0",
-            //     "-c:v",
-            //     "libx264",
-            //     "-preset",
-            //     preset,
-            //     "-tune",
-            //     "zerolatency",
-            //     "-b:v",
-            //     &bitrate,
-            //     "-g",
-            //     &config.keyframe_interval.to_string(),
-            //     "-bf",
-            //     "0", // No B-frames for low latency
-            //     "-pix_fmt",
-            //     "yuv420p",
-            //     "-f",
-            //     "h264",
-            //     "pipe:1",
-            // ])
+            .args(&ffmpeg_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -162,7 +149,18 @@ impl VideoEncoder {
                 if n == 0 {
                     break;
                 }
-                warn!("[ffmpeg] : {}", line.trim());
+                let trimmed = line.trim();
+                // Only show important FFmpeg messages
+                if trimmed.contains("error") || trimmed.contains("Error") {
+                    error!("[ffmpeg] {}", trimmed);
+                } else if trimmed.contains("warning") || trimmed.contains("Warning") {
+                    warn!("[ffmpeg] {}", trimmed);
+                } else if !trimmed.is_empty()
+                    && !trimmed.starts_with("frame=")
+                    && !trimmed.contains("fps=")
+                {
+                    info!("[ffmpeg] {}", trimmed);
+                }
                 line.clear();
             }
         });
@@ -178,8 +176,10 @@ impl VideoEncoder {
                 }
 
                 frame_count += 1;
-                if frame_count.is_multiple_of(60) {
-                    info!("Encoded {} frames", frame_count);
+                if frame_count == 1 {
+                    info!("✓ First frame sent to encoder");
+                } else if frame_count.is_multiple_of(300) {
+                    info!("Sent {} frames to encoder", frame_count);
                 }
             }
 
@@ -222,6 +222,8 @@ impl VideoEncoder {
                     packet_count += 1;
                     if packet_count == 1 {
                         info!("✓ First encoded packet ready!");
+                    } else if packet_count.is_multiple_of(300) {
+                        info!("Encoded {} packets", packet_count);
                     }
                 }
                 Err(e) => {

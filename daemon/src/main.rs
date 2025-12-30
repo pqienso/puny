@@ -2,6 +2,7 @@ mod capture;
 mod config;
 mod display;
 mod encoder;
+mod hw_detect;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -53,7 +54,7 @@ async fn main() -> Result<()> {
 
     // Start encoder
     let (width, height, frame_rate) = config.display.get_dimensions()?;
-    let encoder = VideoEncoder::new(config.encoder.clone(), width, height, frame_rate);
+    let encoder = VideoEncoder::new(config.encoder.clone(), width, height, frame_rate)?;
     encoder.start(frame_rx, packet_tx)?;
 
     info!("Capture + Encoding pipeline initialized");
